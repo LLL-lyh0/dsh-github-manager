@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "GitHub manager",
-    "description": "Sign in to GitHub inside dsh, keep several accounts, and let the AI operate your repositories, issues and pull requests through the connected account."
+    "title": "GitHub repositories",
+    "description": "Read-only view of the selected account's repositories. To change repos, issues or pull requests, ask the AI — the GitHub skill does the work."
   }
 }

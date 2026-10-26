@@ -1,7 +1,10 @@
-# GitHub 管理插件（GitHub manager）
+# GitHub 仓库面板 + GitHub 管理技能（GitHub manager）
 #
 # Host 侧：把个人 GitHub 账户的访问通道（账户 + 令牌 + REST 调用）暴露给本 profile，
-# 并注册 github_accounts / github_api 两个 agent 工具；Client 侧在左侧栏注册管理入口。
+#   注册 github_accounts / github_api 两个 agent 工具，并通过 ctx.skills.registerProvider
+#   注册 github-manager 技能（模型在 GitHub 相关请求上自动加载）。
+# Client 侧：在左侧栏注册「GitHub 仓库」入口，页面只读展示当前账户的仓库概况，
+#   /api/dsh-github-manager/* 上不存在任何写路径。
 - insert:
     - id: dsh-github-manager
       name: 'dsh-github-manager'

@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "GitHub 管理",
-    "description": "在 dsh 内登录 GitHub，可保存多个账户，并让 AI 用你的账户操作仓库、Issue 与 Pull Request。"
+    "title": "GitHub 仓库",
+    "description": "只读查看当前账户的仓库概况。改动仓库、Issue 与 Pull Request 时对 AI 说一声，由 GitHub 技能执行。"
   }
 }

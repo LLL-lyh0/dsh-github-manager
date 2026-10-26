@@ -10,10 +10,11 @@
  * HTTP surface and the tools, so the UI and the agent cannot drift apart.
  */
 
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdir, readFile, rm, writeFile, rename } from 'node:fs/promises';
+import { cpSync, existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const inject = ['webServer', 'tools'];
 
@@ -21,10 +22,7 @@ const NS = 'dsh-github-manager';
 const ROUTE_BASE = '/api/dsh-github-manager';
 const API_BASE = 'https://api.github.com';
 const API_VERSION = '2022-11-28';
-const UA = 'dsh-github-manager/1.0';
-/** Mutating requests must carry this header (client marker, CSRF fence). */
-const CLIENT_MARKER_HEADER = 'x-dsh-github-manager';
-const MAX_BODY_BYTES = 1 << 20;
+const UA = 'dsh-github-manager/1.2';
 
 // ── local store ─────────────────────────────────────────────────────────────
 
@@ -310,8 +308,147 @@ async function opApi({ accountId, method, path, query, body }) {
   return { ok: true, status: result.status, body: result.body, rate: result.rate, account: account.login };
 }
 
-// Device flow (optional; needs an OAuth App client id).
+// ── read-only views (the panel's only job) ──────────────────────────────────
+//
+// The panel renders these; it never performs GitHub writes. Keeping the shaping
+// here means the browser receives a small, stable view model instead of raw API
+// payloads, and cannot be coaxed into an arbitrary API call.
 
+/** A repository as the viewer needs it — no permission or token material. */
+function publicRepo(repo) {
+  const owner = repo?.owner ?? {};
+  return {
+    id: repo?.id ?? null,
+    owner: typeof owner.login === 'string' ? owner.login : '',
+    name: typeof repo?.name === 'string' ? repo.name : '',
+    fullName: typeof repo?.full_name === 'string' ? repo.full_name : '',
+    description: typeof repo?.description === 'string' ? repo.description : null,
+    htmlUrl: typeof repo?.html_url === 'string' ? repo.html_url : '',
+    private: repo?.private === true,
+    fork: repo?.fork === true,
+    archived: repo?.archived === true,
+    visibility: typeof repo?.visibility === 'string' ? repo.visibility : null,
+    defaultBranch: typeof repo?.default_branch === 'string' ? repo.default_branch : null,
+    language: typeof repo?.language === 'string' ? repo.language : null,
+    topics: Array.isArray(repo?.topics) ? repo.topics.filter((x) => typeof x === 'string').slice(0, 8) : [],
+    stars: Number(repo?.stargazers_count) || 0,
+    forks: Number(repo?.forks_count) || 0,
+    openIssues: Number(repo?.open_issues_count) || 0,
+    watched: Number(repo?.subscribers_count) || 0,
+    sizeKb: Number(repo?.size) || 0,
+    pushedAt: typeof repo?.pushed_at === 'string' ? repo.pushed_at : null,
+    updatedAt: typeof repo?.updated_at === 'string' ? repo.updated_at : null,
+    createdAt: typeof repo?.created_at === 'string' ? repo.created_at : null,
+    homepage: typeof repo?.homepage === 'string' && repo.homepage !== '' ? repo.homepage : null,
+  };
+}
+
+/**
+ * Profile + repository rollup for one account.
+ *
+ * Two GitHub calls, both cheap. `repos` is capped at one page on purpose: the
+ * panel advertises itself as a viewer, and paging through thousands of repos is
+ * a job for the skill, which can page deliberately.
+ */
+async function opOverview({ accountId }) {
+  const store = await loadStore();
+  const account = pickAccount(store, accountId);
+  if (!account) {
+    return { ok: false, code: 'error.account.none', error: '还没有登录 GitHub 账户。在对话里说「登录 GitHub」即可添加。' };
+  }
+  const [profile, repos] = await Promise.all([
+    ghFetch(account.token, '/user'),
+    ghFetch(account.token, '/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member'),
+  ]);
+  if (!profile.ok) return { ok: false, code: profile.code, status: profile.status, error: profile.error, account: account.login };
+  if (!repos.ok) return { ok: false, code: repos.code, status: repos.status, error: repos.error, account: account.login };
+
+  const list = Array.isArray(repos.body) ? repos.body.map(publicRepo) : [];
+  const languages = new Map();
+  let stars = 0;
+  let privateCount = 0;
+  let archived = 0;
+  for (const repo of list) {
+    stars += repo.stars;
+    if (repo.private) privateCount += 1;
+    if (repo.archived) archived += 1;
+    if (repo.language) languages.set(repo.language, (languages.get(repo.language) ?? 0) + 1);
+  }
+  const p = profile.body ?? {};
+  return {
+    ok: true,
+    account: {
+      id: account.id,
+      login: account.login,
+      name: typeof p.name === 'string' ? p.name : account.name ?? null,
+      avatarUrl: typeof p.avatar_url === 'string' ? p.avatar_url : account.avatarUrl ?? null,
+      bio: typeof p.bio === 'string' ? p.bio : null,
+      company: typeof p.company === 'string' ? p.company : null,
+      location: typeof p.location === 'string' ? p.location : null,
+      blog: typeof p.blog === 'string' && p.blog !== '' ? p.blog : null,
+      htmlUrl: typeof p.html_url === 'string' ? p.html_url : `https://github.com/${account.login}`,
+      publicRepos: Number(p.public_repos) || 0,
+      publicGists: Number(p.public_gists) || 0,
+      followers: Number(p.followers) || 0,
+      following: Number(p.following) || 0,
+      scopes: Array.isArray(account.scopes) ? account.scopes : [],
+    },
+    stats: {
+      loaded: list.length,
+      // A full page means GitHub has more; the count is a floor, not a total.
+      truncated: list.length >= 100,
+      privateCount,
+      archived,
+      stars,
+      languages: [...languages.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([name, count]) => ({ name, count })),
+    },
+    repos: list,
+    rate: repos.rate,
+  };
+}
+
+/** One repository plus the detail the viewer expands into. */
+async function opRepoDetail({ accountId, owner, repo }) {
+  if (typeof owner !== 'string' || owner === '' || typeof repo !== 'string' || repo === '') {
+    return { ok: false, code: 'error.input.repo', error: '缺少仓库的 owner/name。' };
+  }
+  const store = await loadStore();
+  const account = pickAccount(store, accountId);
+  if (!account) return { ok: false, code: 'error.account.none', error: '还没有登录 GitHub 账户。' };
+  const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const [detail, languages, commits, branches] = await Promise.all([
+    ghFetch(account.token, base),
+    ghFetch(account.token, `${base}/languages`),
+    ghFetch(account.token, `${base}/commits?per_page=8`),
+    ghFetch(account.token, `${base}/branches?per_page=20`),
+  ]);
+  if (!detail.ok) return { ok: false, code: detail.code, status: detail.status, error: detail.error };
+  const languageBytes = languages.ok && languages.body && typeof languages.body === 'object' ? languages.body : {};
+  const totalBytes = Object.values(languageBytes).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  return {
+    ok: true,
+    repo: publicRepo(detail.body),
+    languages: Object.entries(languageBytes)
+      .map(([name, bytes]) => ({ name, bytes: Number(bytes) || 0, share: totalBytes === 0 ? 0 : (Number(bytes) || 0) / totalBytes }))
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, 10),
+    branches: branches.ok && Array.isArray(branches.body)
+      ? branches.body.map((b) => ({ name: b?.name ?? '', sha: b?.commit?.sha ?? '' })).slice(0, 20)
+      : [],
+    commits: commits.ok && Array.isArray(commits.body)
+      ? commits.body.map((c) => ({
+          sha: typeof c?.sha === 'string' ? c.sha : '',
+          shortSha: typeof c?.sha === 'string' ? c.sha.slice(0, 7) : '',
+          message: typeof c?.commit?.message === 'string' ? c.commit.message.split('\n')[0].slice(0, 120) : '',
+          author: typeof c?.commit?.author?.name === 'string' ? c.commit.author.name : '',
+          date: typeof c?.commit?.author?.date === 'string' ? c.commit.author.date : null,
+          htmlUrl: typeof c?.html_url === 'string' ? c.html_url : '',
+        }))
+      : [],
+  };
+}
+
+// ── device flow (skill-side only) ───────────────────────────────────────────
 async function opDeviceStart({ clientId }) {
   const id = typeof clientId === 'string' ? clientId.trim() : '';
   if (id === '') return { ok: false, code: 'error.input.clientId', error: '设备登录需要一个 GitHub OAuth App 的 Client ID。' };
@@ -375,20 +512,6 @@ async function opDevicePoll({ clientId, deviceCode }) {
 
 // ── HTTP surface ────────────────────────────────────────────────────────────
 
-async function readJsonBody(req) {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw new Error('body too large');
-    chunks.push(chunk);
-  }
-  if (chunks.length === 0) return {};
-  const text = Buffer.concat(chunks).toString('utf8');
-  if (text.trim() === '') return {};
-  return JSON.parse(text);
-}
-
 function sendJson(res, code, payload) {
   if (!res || res.writableEnded || res.destroyed) return;
   try {
@@ -438,9 +561,10 @@ function routeHandler(ctx) {
       sendJson(res, 403, { ok: false, ...denied });
       return;
     }
+    let url;
     let path = '/';
     try {
-      const url = new URL(req.url, 'http://localhost');
+      url = new URL(req.url, 'http://localhost');
       path = url.pathname.replace(/\/+$/, '') || '/';
       if (path.startsWith(ROUTE_BASE)) path = path.slice(ROUTE_BASE.length) || '/';
     } catch {
@@ -448,57 +572,30 @@ function routeHandler(ctx) {
       return;
     }
 
-    const isMutation = req.method !== 'GET' && req.method !== 'HEAD';
-    if (isMutation && req.headers[CLIENT_MARKER_HEADER] !== '1') {
-      sendJson(res, 403, { ok: false, code: 'error.proto.forbidden', error: 'forbidden mutation request' });
+    // Read-only surface. Every mutation lives on the `github_accounts` /
+    // `github_api` tools, so the browser literally has no write path: a request
+    // that is not a GET is refused before anything else runs.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      sendJson(res, 405, { ok: false, code: 'error.proto.readOnly', error: 'this surface is read-only; use the github_* tools to change anything' });
       return;
     }
 
-    let body = {};
-    if (isMutation) {
-      try {
-        body = await readJsonBody(req);
-      } catch (error) {
-        sendJson(res, 400, { ok: false, code: 'error.input.body', error: String(error?.message ?? error) });
-        return;
-      }
-    }
+    const accountId = url.searchParams.get('accountId') ?? undefined;
 
     try {
       switch (path) {
         case '/status':
           sendJson(res, 200, await opStatus());
           return;
-        case '/login/token':
-          sendJson(res, 200, await opLoginToken(body ?? {}));
+        case '/overview':
+          sendJson(res, 200, await opOverview({ accountId }));
           return;
-        case '/login/device/start':
-          sendJson(res, 200, await opDeviceStart(body ?? {}));
-          return;
-        case '/login/device/poll':
-          sendJson(res, 200, await opDevicePoll(body ?? {}));
-          return;
-        case '/accounts/remove':
-          sendJson(res, 200, await opRemoveAccount(body ?? {}));
-          return;
-        case '/accounts/default':
-          sendJson(res, 200, await opSetDefault(body ?? {}));
-          return;
-        case '/accounts/refresh':
-          sendJson(res, 200, await opRefresh(body ?? {}));
-          return;
-        case '/repos': {
-          const result = await opApi({
-            accountId: body?.accountId,
-            method: 'GET',
-            path: '/user/repos',
-            query: { per_page: 100, sort: 'updated', affiliation: 'owner,collaborator,organization_member' },
-          });
-          sendJson(res, 200, result);
-          return;
-        }
-        case '/api':
-          sendJson(res, 200, await opApi(body ?? {}));
+        case '/repo':
+          sendJson(res, 200, await opRepoDetail({
+            accountId,
+            owner: url.searchParams.get('owner') ?? '',
+            repo: url.searchParams.get('repo') ?? '',
+          }));
           return;
         default:
           sendJson(res, 404, { ok: false, code: 'error.proto.notFound', error: `unknown route: ${path}` });
@@ -521,12 +618,14 @@ function textRender(args, value) {
 function registerTools(ctx) {
   ctx.effect(() => ctx.tools.register({
     name: 'github_accounts',
-    description: 'Manage the GitHub accounts connected to this dsh session: list them, add one by Personal Access Token, set the default, refresh, or remove one. Use when the user asks which GitHub account is connected or wants to log in/switch. Never echo the token back.',
+    description: 'Manage the GitHub accounts connected to this dsh profile. Actions: list (which accounts exist, which is default), add (Personal Access Token — only when the user already has one and accepts that it enters the transcript), device-start / device-poll (the recommended sign-in: no token ever reaches the chat), default (switch active account), refresh, remove. Use whenever the user asks which GitHub account is connected, wants to sign in, or switch accounts. Never echo a token back.',
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'add', 'default', 'refresh', 'remove'], description: 'Which operation to perform.' },
-        token: { type: 'string', description: 'Personal Access Token, for action=add. Required for add.' },
+        action: { type: 'string', enum: ['list', 'add', 'device-start', 'device-poll', 'default', 'refresh', 'remove'], description: 'Which operation to perform.' },
+        token: { type: 'string', description: 'Personal Access Token, for action=add only.' },
+        clientId: { type: 'string', description: 'GitHub OAuth App Client ID, for device-start / device-poll.' },
+        deviceCode: { type: 'string', description: 'The device_code returned by device-start, for device-poll.' },
         id: { type: 'string', description: 'Account id for default/refresh/remove.' },
         label: { type: 'string', description: 'Optional display label for action=add.' },
       },
@@ -540,6 +639,10 @@ function registerTools(ctx) {
           return opStatus();
         case 'add':
           return opLoginToken({ token: args.token, label: args.label });
+        case 'device-start':
+          return opDeviceStart({ clientId: args.clientId });
+        case 'device-poll':
+          return opDevicePoll({ clientId: args.clientId, deviceCode: args.deviceCode });
         case 'default':
           return opSetDefault({ id: args.id });
         case 'refresh':
@@ -574,10 +677,98 @@ function registerTools(ctx) {
   }), 'dsh-github-manager: github_api tool');
 }
 
+// ── GitHub management skill ─────────────────────────────────────────────────
+//
+// The panel is read-only on purpose: control lives in a skill the model loads
+// when the conversation is about GitHub. The skill body is authored here rather
+// than fetched from the internet, so the profile keeps working offline and the
+// reference files cannot drift out from under the tools it documents.
+
+const GITHUB_SKILL = 'github-manager';
+const SKILL_PROVIDER = 'dsh-github-manager';
+/** Same precedence as the other packaged skill providers (see @deepseek-ai/dsh-skill). */
+const BUNDLED_SKILL_RANK = 600;
+/**
+ * Fallback description. The authoritative copy is the frontmatter of
+ * `skill/SKILL.md`; this is only used if the asset is unreadable so skill
+ * registration can never take the plugin down.
+ */
+const SKILL_DESCRIPTION = 'Operate the user\'s real GitHub account through the dsh-github-manager tools: repositories, branches, file contents, commits, releases, issues, pull requests, Actions runs, gists and notifications. Use whenever a request touches GitHub or a hosted git repository.';
+
+const SKILL_SOURCE_DIR = fileURLToPath(new URL('./skill/', import.meta.url));
+
+/** Split `---` frontmatter off a SKILL.md body; tolerant of plain `key: value`. */
+function parseFrontmatter(raw) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(raw);
+  if (match === null) return { attributes: {}, content: raw };
+  const attributes = {};
+  for (const line of match[1].split(/\r?\n/u)) {
+    const separator = line.indexOf(':');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim().replace(/^["']|["']$/gu, '');
+    if (key !== '') attributes[key] = value;
+  }
+  return { attributes, content: raw.slice(match[0].length).trim() };
+}
+
+function registerGithubSkill(ctx) {
+  if (typeof ctx.inject !== 'function') return;
+  try {
+    ctx.inject(['skills'], (scope) => {
+      scope.effect(function* () {
+        // The plugin may live inside an ASAR archive, where an ordinary file
+        // read by other tools is not possible, so the skill owns a private copy
+        // of its resources for the lifetime of the registration.
+        const directory = mkdtempSync(join(tmpdir(), 'dsh-github-skill-'));
+        yield async () => { await rm(directory, { recursive: true, force: true }); };
+        let locator = join(directory, 'SKILL.md');
+        let description = SKILL_DESCRIPTION;
+        try {
+          cpSync(SKILL_SOURCE_DIR, directory, { recursive: true });
+          const raw = readFileSync(locator, 'utf8');
+          const parsed = parseFrontmatter(raw);
+          if (typeof parsed.attributes.description === 'string' && parsed.attributes.description !== '') {
+            description = parsed.attributes.description;
+          }
+        } catch (error) {
+          // Keep the skill available with its fallback description rather than
+          // failing activation over a packaging mistake.
+          console.warn(`[${NS}] GitHub 技能资源不可用，仍以最小描述注册：`, error);
+          locator = join(SKILL_SOURCE_DIR, 'SKILL.md');
+        }
+        const candidate = {
+          name: GITHUB_SKILL,
+          description,
+          invocation: { modelInvocable: true, userInvocable: true },
+          provider: SKILL_PROVIDER,
+          source: 'bundled',
+          rank: BUNDLED_SKILL_RANK,
+          resourceBase: { kind: 'directory', path: directory },
+          locator,
+        };
+        const provider = {
+          name: SKILL_PROVIDER,
+          list: () => Promise.resolve([candidate]),
+          async get(entry, options) {
+            const { rank: _rank, locator: entryPath, ...summary } = entry;
+            const raw = await readFile(entryPath, { encoding: 'utf8', signal: options?.signal });
+            return { ...summary, content: parseFrontmatter(raw).content };
+          },
+        };
+        yield scope.skills.registerProvider(() => provider);
+      }, `${NS}: GitHub management skill resources`);
+    });
+  } catch (error) {
+    console.warn(`[${NS}] 技能服务不可用，GitHub 技能未注册：`, error);
+  }
+}
+
 // ── plugin entry ────────────────────────────────────────────────────────────
 
 export function apply(ctx) {
   registerTools(ctx);
+  registerGithubSkill(ctx);
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: ROUTE_BASE,
