@@ -91,6 +91,8 @@ mklink /J "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\dsh-github-manager
 - Host 校验 `Host` 必须是 loopback、`Origin` 必须与之一致、`Sec-Fetch-Site` 不能是 `cross-site`。
 - 令牌存在本地文件（`0600`，原子写），接口响应里只出现末四位预览；`publicRepo()` 白名单化视图模型，不带 `permissions`、不带令牌材料。
 - 权限由你授予的 token scope 决定；插件本身不额外提权。
+- 账户文件按 mtime 失效：文件后来才出现（第一次登录，或另一个进程写入）也会被读到，不会因为一次"暂无账户"的结果被永久缓存住。
+- 对 `api.github.com` 的幂等 `GET` 会在 `502/503/504` 与连接错误上重试两次（150ms、450ms）。本机前面挂了一层代理，偶发返回空体 502，重试即可；`401/403/404/422` 永不重试。
 
 ## 与已有技能的关系 / Prior art
 

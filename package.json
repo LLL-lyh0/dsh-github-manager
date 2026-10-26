@@ -1,6 +1,6 @@
 {
   "name": "dsh-github-manager",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "description": "只读的 GitHub 仓库查看面板 + 一个 GitHub 管理技能：在 dsh 内登录 GitHub，面板用来看，AI 用你的账户来操作仓库、Issue、PR。A read-only GitHub repository viewer plus a model-invocable GitHub management skill.",
   "keywords": [

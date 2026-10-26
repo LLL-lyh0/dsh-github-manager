@@ -10,7 +10,7 @@
  * HTTP surface and the tools, so the UI and the agent cannot drift apart.
  */
 
-import { mkdir, readFile, rm, writeFile, rename } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat, writeFile, rename } from 'node:fs/promises';
 import { cpSync, existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,7 +22,7 @@ const NS = 'dsh-github-manager';
 const ROUTE_BASE = '/api/dsh-github-manager';
 const API_BASE = 'https://api.github.com';
 const API_VERSION = '2022-11-28';
-const UA = 'dsh-github-manager/1.2';
+const UA = 'dsh-github-manager/1.2.1';
 
 // ── local store ─────────────────────────────────────────────────────────────
 
@@ -42,13 +42,28 @@ function storeFile() {
 
 /** @type {{ accounts: Array<object>, deviceClientId?: string } | null} */
 let cache = null;
+/**
+ * mtime of the file the cache was built from. A negative result is never
+ * cached: the file can appear later (first sign-in, or a store seeded by
+ * another process), and a stale empty cache would make the panel claim no
+ * account is connected forever.
+ * @type {number | null}
+ */
+let cacheStamp = null;
 
 function emptyStore() {
   return { version: 1, accounts: [], activeAccountId: null, deviceClientId: '' };
 }
 
 async function loadStore() {
-  if (cache) return cache;
+  let stamp = null;
+  try {
+    stamp = (await stat(storeFile())).mtimeMs;
+  } catch {
+    stamp = null;
+  }
+  if (cache !== null && stamp !== null && stamp === cacheStamp) return cache;
+  if (stamp === null) return emptyStore();
   try {
     const raw = await readFile(storeFile(), 'utf8');
     const parsed = JSON.parse(raw);
@@ -57,8 +72,9 @@ async function loadStore() {
       ...parsed,
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
     };
+    cacheStamp = stamp;
   } catch {
-    cache = emptyStore();
+    return emptyStore();
   }
   return cache;
 }
@@ -72,6 +88,11 @@ async function saveStore(store) {
   await writeFile(tmp, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 });
   await rename(tmp, target);
   cache = store;
+  try {
+    cacheStamp = (await stat(target)).mtimeMs;
+  } catch {
+    cacheStamp = null;
+  }
   return store;
 }
 
@@ -115,14 +136,19 @@ function ghHeaders(token, extra) {
   };
 }
 
-async function ghFetch(token, path, init) {
-  const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
-  let response;
-  try {
-    response = await fetch(url, { ...init, headers: ghHeaders(token, init?.headers) });
-  } catch (error) {
-    return { ok: false, status: 0, code: 'error.github.unreachable', error: `无法连接 GitHub：${error?.message ?? String(error)}` };
-  }
+/**
+ * Transport-level failures worth retrying: a connection error, or a gateway
+ * hiccup. In this environment an intercepting proxy in front of api.github.com
+ * intermittently answers 502 with an empty body — retrying an idempotent GET is
+ * correct there, while a 401/403/404/422 must never be retried.
+ */
+const RETRYABLE_STATUS = new Set([502, 503, 504]);
+const RETRY_DELAYS = [150, 450];
+
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+async function ghFetchOnce(url, init, headers) {
+  const response = await fetch(url, { ...init, headers });
   const text = await response.text();
   let body;
   try {
@@ -147,17 +173,47 @@ async function ghFetch(token, path, init) {
   return { ok: true, status: response.status, body, rate };
 }
 
+async function ghFetch(token, path, init) {
+  const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
+  const method = (init?.method ?? 'GET').toUpperCase();
+  const idempotent = method === 'GET' || method === 'HEAD';
+  const attempts = idempotent ? RETRY_DELAYS.length + 1 : 1;
+  const headers = ghHeaders(token, init?.headers);
+
+  let last;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      last = await ghFetchOnce(url, init, headers);
+    } catch (error) {
+      if (attempt + 1 >= attempts) {
+        return { ok: false, status: 0, code: 'error.github.unreachable', error: `无法连接 GitHub：${error?.message ?? String(error)}` };
+      }
+      await sleep(RETRY_DELAYS[attempt]);
+      continue;
+    }
+    if (last.ok || !RETRYABLE_STATUS.has(last.status) || attempt + 1 >= attempts) return last;
+    await sleep(RETRY_DELAYS[attempt]);
+  }
+  return last;
+}
+
 /** Resolve the token's identity + scopes; used at login and on refresh. */
 async function fetchIdentity(token) {
   const user = await ghFetch(token, '/user');
   if (!user.ok) return { ok: false, code: user.code, error: user.error };
   let scopes = [];
-  try {
-    const probe = await fetch(`${API_BASE}/user`, { headers: ghHeaders(token) });
-    const header = probe.headers.get('x-oauth-scopes');
-    if (typeof header === 'string') scopes = header.split(',').map((s) => s.trim()).filter(Boolean);
-  } catch {
-    /* scopes are advisory */
+  for (let attempt = 0; attempt < RETRY_DELAYS.length + 1; attempt += 1) {
+    try {
+      const probe = await fetch(`${API_BASE}/user`, { headers: ghHeaders(token) });
+      if (probe.ok) {
+        const header = probe.headers.get('x-oauth-scopes');
+        if (typeof header === 'string') scopes = header.split(',').map((s) => s.trim()).filter(Boolean);
+        break;
+      }
+    } catch {
+      /* scopes are advisory */
+    }
+    await sleep(RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)]);
   }
   const b = user.body ?? {};
   return {
