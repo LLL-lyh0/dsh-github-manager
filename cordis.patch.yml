@@ -1,0 +1,8 @@
+# GitHub 管理插件（GitHub manager）
+#
+# Host 侧：把个人 GitHub 账户的访问通道（账户 + 令牌 + REST 调用）暴露给本 profile，
+# 并注册 github_accounts / github_api 两个 agent 工具；Client 侧在左侧栏注册管理入口。
+- insert:
+    - id: dsh-github-manager
+      name: 'dsh-github-manager'
+      config: {}

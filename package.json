@@ -1,0 +1,54 @@
+{
+  "name": "dsh-github-manager",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "在 dsh 内登录 GitHub，并给 dsh 一个按账户区分的 GitHub 访问通道：管理面板 + 让 AI 用你的账户操作仓库、Issue、PR。Sign in to GitHub inside dsh, manage multiple accounts, and let the AI operate your GitHub through the connected account.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "cordis",
+    "github",
+    "github-api",
+    "credentials",
+    "git"
+  ],
+  "license": "MIT",
+  "author": "LLL-lyh0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LLL-lyh0/dsh-github-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LLL-lyh0/dsh-github-manager/issues"
+  },
+  "homepage": "https://github.com/LLL-lyh0/dsh-github-manager#readme",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}
