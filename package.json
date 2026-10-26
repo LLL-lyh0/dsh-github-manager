@@ -1,6 +1,6 @@
 {
   "name": "dsh-github-manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "在 dsh 内登录 GitHub，并给 dsh 一个按账户区分的 GitHub 访问通道：管理面板 + 让 AI 用你的账户操作仓库、Issue、PR。Sign in to GitHub inside dsh, manage multiple accounts, and let the AI operate your GitHub through the connected account.",
   "keywords": [
