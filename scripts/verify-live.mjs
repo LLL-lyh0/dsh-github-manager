@@ -6,9 +6,12 @@
  *
  * Read-only: it never writes the account store, and every GitHub call is a GET.
  */
-import { apply } from 'file:///D:/DeepSeekHarness/dsh-github-manager/index.js';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
-process.env.DSH_HOME = 'C:\\Users\\TGL\\.dsh';
+process.env.DSH_HOME = process.env.DSH_HOME || join(homedir(), '.dsh');
+
+const { apply } = await import(new URL('../index.js', import.meta.url).href);
 
 const seen = [];
 const realFetch = globalThis.fetch;

@@ -29,7 +29,7 @@ globalThis.fetch = async (url) => {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 };
 
-const { apply } = await import('file:///D:/DeepSeekHarness/dsh-github-manager/index.js');
+const { apply } = await import(new URL('../index.js', import.meta.url).href);
 
 function makeCtx() {
   const routes = new Map();
@@ -93,7 +93,7 @@ writeFileSync(join(dir, 'accounts.json'), JSON.stringify({
   accounts: [{
     id: 'late-account', login: 'octocat', name: 'The Octocat', avatarUrl: 'https://example.invalid/a.png',
     email: null, scopes: ['repo'], tokenKind: 'pat', label: 'octocat',
-    token: 'ghp_SECRETtokenVALUE0123456789', addedAt: new Date().toISOString(),
+    token: 'fake-token-for-tests-only', addedAt: new Date().toISOString(),
     verifiedAt: new Date().toISOString(), lastError: null, isDefault: true,
   }],
   activeAccountId: 'late-account',

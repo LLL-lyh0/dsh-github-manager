@@ -16,7 +16,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const TOKEN = 'ghp_SECRETtokenVALUE0123456789';
+const TOKEN = 'fake-token-for-tests-only';
 
 const home = await mkdtemp(join(tmpdir(), 'gm-ro-home-'));
 process.env.DSH_HOME = home;
